@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         VK Video Live - Lag Monitor & Soft Reload
+// @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      1.0
-// @description  Показывает задержку (лаг) прямого эфира на live.vkvideo.ru и добавляет кнопку мягкого перезапуска (сброс к актуальному лайву) без перезагрузки страницы
+// @version      2.0
+// @description  Показывает задержку (лаг) прямого эфира, добавляет кнопку мягкого ресинка к лайву и держит плеер на максимальном качестве на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
 // @run-at       document-idle
@@ -72,8 +72,8 @@
     document.head.appendChild(style);
   }
 
-  // VK-video-player хранит video и все контролы внутри вложенных shadow DOM,
-  // поэтому обычный querySelector их не видит - ищем рекурсивно.
+  // Резервный способ достать video/кнопки, если внутренний API плеера недоступен -
+  // они лежат во вложенных shadow DOM, обычный querySelector их не видит.
   function findDeep(root, selector) {
     const el = root.querySelector(selector);
     if (el) return el;
@@ -82,6 +82,71 @@
         const found = findDeep(node.shadowRoot, selector);
         if (found) return found;
       }
+    }
+    return null;
+  }
+
+  // <vk-video-player> хранит реактивный стор плеера (RxJS-подобные *$ поля и
+  // готовые экшены типа setQuality/switchToActiveLive) - используем его напрямую,
+  // это надёжнее и не мигает UI, в отличие от кликов по DOM-меню настроек.
+  function getPlayerApi() {
+    const el = document.querySelector('vk-video-player');
+    if (!el || !el.store) return null;
+    let player;
+    try {
+      player = el.store.getPlayer();
+    } catch (e) {
+      return null;
+    }
+    if (!player || !player.info) return null;
+    const actions = el.store.actions && el.store.actions.internal;
+    return { el, info: player.info, actions };
+  }
+
+  function enforceMaxQuality(api) {
+    try {
+      const tracks = api.info.availableVideoTracks$.getValue();
+      if (!tracks || !tracks.length) return;
+      const maxTrack = tracks.reduce((a, b) => (b.size.height > a.size.height ? b : a));
+      const current = api.info.currentQuality$.getValue();
+      const isAuto = api.info.isAutoQualityEnabled$.getValue();
+      if ((isAuto || current !== maxTrack.quality) && api.actions && api.actions.setQuality) {
+        api.actions.setQuality(maxTrack.quality, false);
+      }
+    } catch (e) {
+      // API плеера изменилось / недоступно - просто пропускаем эту итерацию
+    }
+  }
+
+  function softReload() {
+    const api = getPlayerApi();
+    try {
+      if (api && api.actions && api.actions.switchToActiveLive) {
+        api.actions.switchToActiveLive();
+        return;
+      }
+    } catch (e) {}
+
+    const liveBtn = findDeep(document, '[data-testid="btn-live-offset"]');
+    if (liveBtn) {
+      liveBtn.click();
+      return;
+    }
+
+    const video = findDeep(document, 'video');
+    if (video && video.seekable && video.seekable.length) {
+      video.currentTime = Math.max(0, video.seekable.end(video.seekable.length - 1) - 0.5);
+      if (video.paused) video.play().catch(() => {});
+    }
+  }
+
+  function getLag(api) {
+    try {
+      if (api && api.info.liveLatency$) return api.info.liveLatency$.getValue();
+    } catch (e) {}
+    const video = findDeep(document, 'video');
+    if (video && video.seekable && video.seekable.length) {
+      return Math.max(0, video.seekable.end(video.seekable.length - 1) - video.currentTime);
     }
     return null;
   }
@@ -99,38 +164,22 @@
     `;
     document.body.appendChild(panel);
 
-    panel.querySelector('.vklm-reload').addEventListener('click', softReload);
+    panel.querySelector('.vklm-reload').addEventListener('click', () => {
+      const reloadBtn = panel.querySelector('.vklm-reload');
+      softReload();
+      reloadBtn.classList.remove('vklm-spin');
+      void reloadBtn.offsetWidth;
+      reloadBtn.classList.add('vklm-spin');
+    });
 
-    // Если плеер разворачивают в fullscreen, переносим панель внутрь fullscreen-элемента,
-    // иначе она окажется скрыта браузером вместе с остальным document.body.
+    // В fullscreen переносим панель внутрь fullscreen-элемента, иначе браузер
+    // скроет её вместе с остальным document.body.
     document.addEventListener('fullscreenchange', () => {
       const fsEl = document.fullscreenElement;
       (fsEl || document.body).appendChild(panel);
     });
 
     return panel;
-  }
-
-  function softReload() {
-    const reloadBtn = document.querySelector(`#${PANEL_ID} .vklm-reload`);
-    // Родная кнопка плеера "Перемотать на актуальный лайв" - самый надёжный способ
-    // мягко скинуть лаг: не трогает страницу, просто сдвигает воспроизведение к live-эджу.
-    const liveBtn = findDeep(document, '[data-testid="btn-live-offset"]');
-    if (liveBtn) {
-      liveBtn.click();
-    } else {
-      const video = findDeep(document, 'video');
-      if (video && video.seekable && video.seekable.length) {
-        video.currentTime = Math.max(0, video.seekable.end(video.seekable.length - 1) - 0.5);
-        if (video.paused) video.play().catch(() => {});
-      }
-    }
-
-    if (reloadBtn) {
-      reloadBtn.classList.remove('vklm-spin');
-      void reloadBtn.offsetWidth;
-      reloadBtn.classList.add('vklm-spin');
-    }
   }
 
   function positionPanel(panel, video) {
@@ -141,26 +190,27 @@
 
   function updateLoop() {
     const panel = createPanel();
-    const video = findDeep(document, 'video');
+    const api = getPlayerApi();
+    const lag = getLag(api);
     const label = panel.querySelector('.vklm-label');
     const dot = panel.querySelector('.vklm-dot');
 
-    if (!video || !video.seekable || video.seekable.length === 0) {
+    if (lag === null) {
       panel.style.display = 'none';
       return;
     }
 
-    const liveEdge = video.seekable.end(video.seekable.length - 1);
-    const lag = Math.max(0, liveEdge - video.currentTime);
-
     panel.style.display = 'flex';
-    positionPanel(panel, video);
+    const video = findDeep(document, 'video');
+    if (video) positionPanel(panel, video);
     label.textContent = `лаг: ${lag.toFixed(1)} с`;
 
     let color = '#3fd15e';
     if (lag > 15) color = '#ff4d4f';
     else if (lag > 5) color = '#ffb020';
     dot.style.background = color;
+
+    if (api) enforceMaxQuality(api);
   }
 
   injectStyles();
