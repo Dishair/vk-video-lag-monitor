@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      5.1
+// @version      5.2
 // @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву), держит плеер на максимальном качестве и в fullscreen/при бездействии курсора ведёт себя как остальные элементы плеера на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
@@ -257,7 +257,11 @@
     const api = getPlayerApi();
     const lag = getLag(api);
     const video = findDeep(document, 'video');
-    const bar = getChatTopBar();
+    // Шапка чата - обычный DOM-узел вне поддерева fullscreen-элемента. Браузер в
+    // fullscreen рисует поверх всей страницы именно это поддерево (даже там, где
+    // оно само ничего не рисует), поэтому всё, что вставлено в чат, становится
+    // невидимым - принудительно уходим в floating, пока активен fullscreen.
+    const bar = document.fullscreenElement ? null : getChatTopBar();
 
     if (lag === null) {
       document.getElementById(PANEL_ID)?.remove();
