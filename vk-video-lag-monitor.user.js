@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      2.0
-// @description  Показывает задержку (лаг) прямого эфира, добавляет кнопку мягкого ресинка к лайву и держит плеер на максимальном качестве на live.vkvideo.ru
+// @version      4.0
+// @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву) и держит плеер на максимальном качестве на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
 // @run-at       document-idle
@@ -12,7 +12,7 @@
 (function () {
   'use strict';
 
-  const PANEL_ID = 'vk-lag-monitor-panel';
+  const PANEL_ID = 'vk-lag-monitor-badge';
   const STYLE_ID = 'vk-lag-monitor-style';
 
   function injectStyles() {
@@ -21,48 +21,42 @@
     style.id = STYLE_ID;
     style.textContent = `
       #${PANEL_ID} {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 30px;
+        padding: 0 10px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.08);
+        font: 12px/1 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+        color: #fff;
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+        flex: none;
+      }
+      #${PANEL_ID}:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+      #${PANEL_ID}[data-kind="floating"] {
         position: fixed;
         z-index: 2147483647;
-        display: none;
-        align-items: center;
-        gap: 8px;
-        padding: 6px 10px;
         background: rgba(20, 20, 20, 0.85);
         border: 1px solid rgba(255, 255, 255, 0.15);
-        border-radius: 8px;
-        font: 12px/1.4 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-        color: #fff;
-        user-select: none;
       }
       #${PANEL_ID} .vklm-dot {
-        width: 8px;
-        height: 8px;
+        width: 7px;
+        height: 7px;
         border-radius: 50%;
         flex: none;
       }
-      #${PANEL_ID} .vklm-label {
-        white-space: nowrap;
+      #${PANEL_ID} .vklm-icon {
+        opacity: 0.7;
+        font-size: 12px;
+        display: inline-block;
       }
-      #${PANEL_ID} button.vklm-reload {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 22px;
-        height: 22px;
-        border: none;
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.12);
-        color: #fff;
-        cursor: pointer;
-        font-size: 13px;
-        line-height: 1;
-        padding: 0;
-      }
-      #${PANEL_ID} button.vklm-reload:hover {
-        background: rgba(255, 255, 255, 0.25);
-      }
-      #${PANEL_ID} button.vklm-reload.vklm-spin {
-        animation: vklm-spin 0.6s linear;
+      #${PANEL_ID}.vklm-pulse .vklm-icon {
+        animation: vklm-spin 0.5s linear;
       }
       @keyframes vklm-spin {
         from { transform: rotate(0deg); }
@@ -151,69 +145,94 @@
     return null;
   }
 
-  function createPanel() {
-    let panel = document.getElementById(PANEL_ID);
-    if (panel) return panel;
-
-    panel = document.createElement('div');
-    panel.id = PANEL_ID;
-    panel.innerHTML = `
+  function buildBadge() {
+    const el = document.createElement('div');
+    el.id = PANEL_ID;
+    el.title = 'Клик - мягкий перезапуск стрима (сброс к актуальному лайву)';
+    el.innerHTML = `
       <span class="vklm-dot"></span>
-      <span class="vklm-label">лаг: —</span>
-      <button class="vklm-reload" title="Мягкий перезапуск (сброс к актуальному лайву)">⟳</button>
+      <span class="vklm-label">—</span>
+      <span class="vklm-icon">⟳</span>
     `;
-    document.body.appendChild(panel);
-
-    panel.querySelector('.vklm-reload').addEventListener('click', () => {
-      const reloadBtn = panel.querySelector('.vklm-reload');
+    el.addEventListener('click', () => {
       softReload();
-      reloadBtn.classList.remove('vklm-spin');
-      void reloadBtn.offsetWidth;
-      reloadBtn.classList.add('vklm-spin');
+      el.classList.remove('vklm-pulse');
+      void el.offsetWidth;
+      el.classList.add('vklm-pulse');
     });
-
-    // В fullscreen переносим панель внутрь fullscreen-элемента, иначе браузер
-    // скроет её вместе с остальным document.body.
-    document.addEventListener('fullscreenchange', () => {
-      const fsEl = document.fullscreenElement;
-      (fsEl || document.body).appendChild(panel);
-    });
-
-    return panel;
+    return el;
   }
 
-  function positionPanel(panel, video) {
-    const rect = video.getBoundingClientRect();
-    panel.style.top = `${Math.max(8, rect.top + 10)}px`;
-    panel.style.left = `${Math.max(8, rect.right - 150)}px`;
+  function getChatTopBar() {
+    const bar = document.querySelector('[class*="StreamChatTopPanel_root_"]');
+    if (!bar || !bar.offsetParent) return null;
+    // При сворачивании чата панель не исчезает из DOM, а уезжает за пределы
+    // экрана (translate/left за viewport) - offsetParent на это не реагирует.
+    const rect = bar.getBoundingClientRect();
+    if (rect.width < 60 || rect.left >= window.innerWidth || rect.right <= 0) return null;
+    return bar;
+  }
+
+  // Встраивает бейдж настоящим ребёнком в шапку чата (перед иконкой участников),
+  // чтобы флекс-контейнер сам расставил отступы вместе с остальными иконками -
+  // никакой ручной математики позиционирования и никакого оверлея поверх плеера.
+  function placeBadge(bar, video) {
+    const kind = bar ? 'inline' : 'floating';
+    let badge = document.getElementById(PANEL_ID);
+    if (badge && badge.dataset.kind !== kind) {
+      badge.remove();
+      badge = null;
+    }
+    if (!badge) {
+      badge = buildBadge();
+      badge.dataset.kind = kind;
+    }
+
+    if (kind === 'inline') {
+      const controls = bar.querySelector('[class*="StreamChatTopPanel_controls_"]');
+      const nextSibling = controls || null;
+      if (badge.parentElement !== bar || badge.nextElementSibling !== nextSibling) {
+        if (controls) bar.insertBefore(badge, controls);
+        else bar.appendChild(badge);
+      }
+      badge.style.top = '';
+      badge.style.left = '';
+    } else {
+      if (badge.parentElement !== document.body) document.body.appendChild(badge);
+      if (video) {
+        const rect = video.getBoundingClientRect();
+        badge.style.top = `${Math.max(8, rect.top + 10)}px`;
+        badge.style.left = `${Math.max(8, rect.right - 140)}px`;
+      }
+    }
+
+    return badge;
   }
 
   function updateLoop() {
-    const panel = createPanel();
+    injectStyles();
     const api = getPlayerApi();
     const lag = getLag(api);
-    const label = panel.querySelector('.vklm-label');
-    const dot = panel.querySelector('.vklm-dot');
+    const video = findDeep(document, 'video');
+    const bar = getChatTopBar();
 
     if (lag === null) {
-      panel.style.display = 'none';
+      document.getElementById(PANEL_ID)?.remove();
       return;
     }
 
-    panel.style.display = 'flex';
-    const video = findDeep(document, 'video');
-    if (video) positionPanel(panel, video);
-    label.textContent = `лаг: ${lag.toFixed(1)} с`;
+    const badge = placeBadge(bar, video);
+    badge.querySelector('.vklm-label').textContent = `${lag.toFixed(1)} с`;
+    badge.title = `Лаг стрима: ${lag.toFixed(1)} с. Клик - мягкий перезапуск (сброс к актуальному лайву)`;
 
     let color = '#3fd15e';
     if (lag > 15) color = '#ff4d4f';
     else if (lag > 5) color = '#ffb020';
-    dot.style.background = color;
+    badge.querySelector('.vklm-dot').style.background = color;
 
     if (api) enforceMaxQuality(api);
   }
 
-  injectStyles();
   setInterval(updateLoop, 1000);
   updateLoop();
 })();
