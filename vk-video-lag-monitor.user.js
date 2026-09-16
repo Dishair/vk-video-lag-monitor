@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      4.0
-// @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву) и держит плеер на максимальном качестве на live.vkvideo.ru
+// @version      5.0
+// @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву), держит плеер на максимальном качестве и в fullscreen/при бездействии курсора ведёт себя как остальные элементы плеера на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
 // @run-at       document-idle
@@ -34,6 +34,8 @@
         user-select: none;
         white-space: nowrap;
         flex: none;
+        opacity: 1;
+        transition: opacity 0.2s ease;
       }
       #${PANEL_ID}:hover {
         background: rgba(255, 255, 255, 0.16);
@@ -43,6 +45,10 @@
         z-index: 2147483647;
         background: rgba(20, 20, 20, 0.85);
         border: 1px solid rgba(255, 255, 255, 0.15);
+      }
+      #${PANEL_ID}.vklm-idle-hidden {
+        opacity: 0;
+        pointer-events: none;
       }
       #${PANEL_ID} .vklm-dot {
         width: 7px;
@@ -145,6 +151,22 @@
     return null;
   }
 
+  // Плеер прячет свою нижнюю панель управления, добавляя ей класс controls-hidden
+  // после нескольких секунд бездействия курсора - синхронизируем с этим floating-бейдж.
+  // Ссылку кэшируем, т.к. эта проверка дёргается на каждое движение мыши, а полный
+  // обход (в т.ч. вложенных shadow DOM) на каждый mousemove был бы расточительным.
+  let cachedControlsWrapper = null;
+  function getControlsWrapper() {
+    if (cachedControlsWrapper && cachedControlsWrapper.isConnected) return cachedControlsWrapper;
+    cachedControlsWrapper = findDeep(document, '[class*="wrapper-bottom"]');
+    return cachedControlsWrapper;
+  }
+  function areControlsHidden() {
+    const wrapper = getControlsWrapper();
+    if (!wrapper) return false;
+    return wrapper.className.toString().includes('controls-hidden');
+  }
+
   function buildBadge() {
     const el = document.createElement('div');
     el.id = PANEL_ID;
@@ -176,6 +198,9 @@
   // Встраивает бейдж настоящим ребёнком в шапку чата (перед иконкой участников),
   // чтобы флекс-контейнер сам расставил отступы вместе с остальными иконками -
   // никакой ручной математики позиционирования и никакого оверлея поверх плеера.
+  // Если чат закрыт - всплывает над плеером; в fullscreen обычный document.body
+  // не рендерится (браузер рисует только поддерево fullscreen-элемента), поэтому
+  // в этом случае бейдж переезжает внутрь document.fullscreenElement.
   function placeBadge(bar, video) {
     const kind = bar ? 'inline' : 'floating';
     let badge = document.getElementById(PANEL_ID);
@@ -197,13 +222,17 @@
       }
       badge.style.top = '';
       badge.style.left = '';
+      badge.classList.remove('vklm-idle-hidden');
     } else {
-      if (badge.parentElement !== document.body) document.body.appendChild(badge);
+      const fsEl = document.fullscreenElement;
+      const targetParent = fsEl || document.body;
+      if (badge.parentElement !== targetParent) targetParent.appendChild(badge);
       if (video) {
         const rect = video.getBoundingClientRect();
         badge.style.top = `${Math.max(8, rect.top + 10)}px`;
         badge.style.left = `${Math.max(8, rect.right - 140)}px`;
       }
+      badge.classList.toggle('vklm-idle-hidden', areControlsHidden());
     }
 
     return badge;
@@ -232,6 +261,29 @@
 
     if (api) enforceMaxQuality(api);
   }
+
+  // Лёгкая синхронизация видимости floating-бейджа с курсором - полный updateLoop
+  // (лаг, качество, поиск video/чата) гоняем раз в секунду по таймеру, а тут только
+  // дешёвая проверка класса controls-hidden, троттлинг нужен т.к. mousemove стреляет часто.
+  let idleSyncScheduled = false;
+  function syncIdleVisibility() {
+    const badge = document.getElementById(PANEL_ID);
+    if (!badge || badge.dataset.kind !== 'floating') return;
+    badge.classList.toggle('vklm-idle-hidden', areControlsHidden());
+  }
+  function scheduleIdleSync() {
+    if (idleSyncScheduled) return;
+    idleSyncScheduled = true;
+    setTimeout(() => {
+      idleSyncScheduled = false;
+      syncIdleVisibility();
+    }, 150);
+  }
+
+  document.addEventListener('mousemove', scheduleIdleSync, { passive: true });
+  // При входе/выходе из fullscreen document.body перестаёт (или начинает) рендериться -
+  // сразу переносим бейдж, не дожидаясь следующего тика интервала.
+  document.addEventListener('fullscreenchange', updateLoop);
 
   setInterval(updateLoop, 1000);
   updateLoop();
