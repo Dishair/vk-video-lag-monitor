@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      5.0
+// @version      5.1
 // @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву), держит плеер на максимальном качестве и в fullscreen/при бездействии курсора ведёт себя как остальные элементы плеера на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
@@ -195,6 +195,20 @@
     return bar;
   }
 
+  // У некоторых стримеров сверху видео на всю ширину висит баннер с алертами
+  // (донаты/подписки) - без него достаточно небольшого отступа, а поверх него
+  // бейдж перекрывал бы текст, поэтому ставим его чуть ниже баннера.
+  function topOffsetForVideo(videoRect) {
+    const banner = document.querySelector('[class*="TopMenu_root_"]');
+    if (banner) {
+      const bannerRect = banner.getBoundingClientRect();
+      if (bannerRect.width > videoRect.width * 0.5 && bannerRect.bottom > videoRect.top) {
+        return bannerRect.bottom + 8;
+      }
+    }
+    return videoRect.top + 10;
+  }
+
   // Встраивает бейдж настоящим ребёнком в шапку чата (перед иконкой участников),
   // чтобы флекс-контейнер сам расставил отступы вместе с остальными иконками -
   // никакой ручной математики позиционирования и никакого оверлея поверх плеера.
@@ -229,7 +243,7 @@
       if (badge.parentElement !== targetParent) targetParent.appendChild(badge);
       if (video) {
         const rect = video.getBoundingClientRect();
-        badge.style.top = `${Math.max(8, rect.top + 10)}px`;
+        badge.style.top = `${Math.max(8, topOffsetForVideo(rect))}px`;
         badge.style.left = `${Math.max(8, rect.right - 140)}px`;
       }
       badge.classList.toggle('vklm-idle-hidden', areControlsHidden());
