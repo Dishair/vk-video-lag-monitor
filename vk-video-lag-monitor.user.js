@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      5.2
+// @version      5.3
 // @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву), держит плеер на максимальном качестве и в fullscreen/при бездействии курсора ведёт себя как остальные элементы плеера на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
@@ -142,7 +142,13 @@
 
   function getLag(api) {
     try {
-      if (api && api.info.liveLatency$) return api.info.liveLatency$.getValue();
+      if (api && api.info.liveLatency$) {
+        // Пока плеер не отдал первое значение (стрим ещё грузится/буферизует),
+        // getValue() возвращает undefined, а не null - его нельзя отдавать как есть,
+        // иначе updateLoop упадёт на lag.toFixed(1) и даже выбор качества не выполнится.
+        const val = api.info.liveLatency$.getValue();
+        if (typeof val === 'number' && !Number.isNaN(val)) return val;
+      }
     } catch (e) {}
     const video = findDeep(document, 'video');
     if (video && video.seekable && video.seekable.length) {
@@ -255,6 +261,11 @@
   function updateLoop() {
     injectStyles();
     const api = getPlayerApi();
+    // Выбор максимального качества не должен зависеть от того, успел ли посчитаться
+    // лаг - раньше это было в конце функции и пропускалось при любой ошибке/раннем
+    // return выше по коду.
+    if (api) enforceMaxQuality(api);
+
     const lag = getLag(api);
     const video = findDeep(document, 'video');
     // Шапка чата - обычный DOM-узел вне поддерева fullscreen-элемента. Браузер в
@@ -263,7 +274,7 @@
     // невидимым - принудительно уходим в floating, пока активен fullscreen.
     const bar = document.fullscreenElement ? null : getChatTopBar();
 
-    if (lag === null) {
+    if (typeof lag !== 'number' || Number.isNaN(lag)) {
       document.getElementById(PANEL_ID)?.remove();
       return;
     }
@@ -276,8 +287,6 @@
     if (lag > 15) color = '#ff4d4f';
     else if (lag > 5) color = '#ffb020';
     badge.querySelector('.vklm-dot').style.background = color;
-
-    if (api) enforceMaxQuality(api);
   }
 
   // Лёгкая синхронизация видимости floating-бейджа с курсором - полный updateLoop
