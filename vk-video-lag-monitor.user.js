@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VK Video Live - Lag Monitor, Soft Reload & Max Quality
 // @namespace    https://tampermonkey.net/
-// @version      5.3
+// @version      5.5
 // @description  Встраивает индикатор лага в шапку чата (клик = мягкий ресинк к лайву), держит плеер на максимальном качестве и в fullscreen/при бездействии курсора ведёт себя как остальные элементы плеера на live.vkvideo.ru
 // @author       you
 // @match        https://live.vkvideo.ru/*
@@ -140,6 +140,12 @@
     }
   }
 
+  // Потолок адекватности: выше него лаг всё равно нечитаем для человека (и во
+  // время ресинка плеер иногда на мгновение отдаёт в liveLatency$ совсем дикие
+  // значения вроде общего времени стрима) - в обоих случаях показываем просто
+  // ">60", без разницы, 61 там на самом деле или 38000.
+  const LAG_DISPLAY_CAP = 60;
+
   function getLag(api) {
     try {
       if (api && api.info.liveLatency$) {
@@ -147,7 +153,7 @@
         // getValue() возвращает undefined, а не null - его нельзя отдавать как есть,
         // иначе updateLoop упадёт на lag.toFixed(1) и даже выбор качества не выполнится.
         const val = api.info.liveLatency$.getValue();
-        if (typeof val === 'number' && !Number.isNaN(val)) return val;
+        if (typeof val === 'number' && !Number.isNaN(val) && val >= 0) return val;
       }
     } catch (e) {}
     const video = findDeep(document, 'video');
@@ -275,16 +281,22 @@
     const bar = document.fullscreenElement ? null : getChatTopBar();
 
     if (typeof lag !== 'number' || Number.isNaN(lag)) {
-      document.getElementById(PANEL_ID)?.remove();
+      // Значения ещё нет (стрим грузится/буферизует) - оставляем уже показанный
+      // бейдж как есть и ждём следующего тика, вместо того чтобы на секунду
+      // прятать его. Прячем только если плеера/видео вообще нет.
+      if (!api && !video) {
+        document.getElementById(PANEL_ID)?.remove();
+      }
       return;
     }
 
     const badge = placeBadge(bar, video);
-    badge.querySelector('.vklm-label').textContent = `${lag.toFixed(1)} с`;
-    badge.title = `Лаг стрима: ${lag.toFixed(1)} с. Клик - мягкий перезапуск (сброс к актуальному лайву)`;
+    const displayLag = lag > LAG_DISPLAY_CAP ? `>${LAG_DISPLAY_CAP}` : lag.toFixed(1);
+    badge.querySelector('.vklm-label').textContent = `${displayLag} с`;
+    badge.title = `Лаг стрима: ${lag > LAG_DISPLAY_CAP ? `больше ${LAG_DISPLAY_CAP}` : lag.toFixed(1)} с. Клик - мягкий перезапуск (сброс к актуальному лайву)`;
 
     let color = '#3fd15e';
-    if (lag > 15) color = '#ff4d4f';
+    if (lag > LAG_DISPLAY_CAP) color = '#ff4d4f';
     else if (lag > 5) color = '#ffb020';
     badge.querySelector('.vklm-dot').style.background = color;
   }
